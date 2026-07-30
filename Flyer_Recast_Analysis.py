@@ -1,6 +1,6 @@
 """
 Pipeline
---------
+
 1. Load the point cloud.
 2. Get a rough center from points above a high-Z percentile.
 3. Slice the cloud along Y (giving XZ cross sections) and along X
@@ -28,9 +28,8 @@ import numpy as np
 from scipy.signal import find_peaks, peak_widths
 
 
-# --------------------------------------------------------------------------
-# I/O
-# --------------------------------------------------------------------------
+
+
 def load_xyz(path, skip_header=None, verbose=True):
     """
     Loading xyz file, 
