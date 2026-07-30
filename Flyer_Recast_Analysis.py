@@ -1,11 +1,4 @@
-#!/usr/bin/env python3
 """
-edge_detection_ellipse_fit.py
-
-Isolate the inner and outer rim of a laser-cut circle in a surface-morphology
-XYZ point cloud, using elevated-Z "recast ridge" peaks found in XZ and YZ
-cross-sectional slices, then fit an ellipse to each rim and report Z stats.
-
 Pipeline
 --------
 1. Load the point cloud.
@@ -27,40 +20,6 @@ Pipeline
    plus the fitted ellipse geometry, and optionally save the flattened
    point cloud and a diagnostic plot.
 
-Usage
------
-    python edge_detection_ellipse_fit.py sample.xyz \
-        --profile-bins 300 \
-        --n-slices 200 \
-        --prominence 2.0 \
-        --min-peak-distance 3 \
-        --surface-order 2 \
-        --baseline-margin 0.08 \
-        --flatten-output flattened.xyz \
-        --plot rim_fit.png
-
-Input file: whitespace- or comma-separated x y z columns, header optional.
-
-Notes / things you will likely want to tune for your data
------------------------------------------------------------
-- `--prominence` is the most important knob: it is the minimum height a
-  peak must stand above its local surroundings (in Z units) to count as
-  a recast ridge. Too low -> noise gets picked up as edges. Too high ->
-  real ridges get missed. Print/plot the profile for one slice first if
-  you're unsure what value to use.
-- `--z-percentile` controls the rough center estimate; only used to seed
-  the radius-based inner/outer split, not the final fit.
-- If your point cloud is a dense regular grid, increase `--n-slices` and
-  `--profile-bins` since more slices/bins is cheap. If it's a sparse or
-  irregular scan, keep bin counts modest and increase `--min-pts`.
-- `--surface-order 1` fits a plane (tilt only); `--surface-order 2` (the
-  default) also corrects bow/curvature. Only use 2 if your baseline is
-  genuinely curved -- fitting a quadratic to a flat, noisy baseline can
-  overcorrect and introduce artificial curvature at the edges of the scan.
-- `--baseline-margin` controls how much clearance beyond the outer rim is
-  required before a point counts as "true baseline" for the surface fit.
-  Increase it if any recast/splatter extends further out than expected.
-- Pass `--no-flatten` to skip the flattening step and get raw Z stats.
 """
 
 import argparse
@@ -74,22 +33,14 @@ from scipy.signal import find_peaks, peak_widths
 # --------------------------------------------------------------------------
 def load_xyz(path, skip_header=None, verbose=True):
     """
-    Load an xyz point cloud, tolerating the kind of file real profilometer
-    software (Zygo, etc.) actually exports: one or more lines of text
-    metadata before the data starts, comma- or whitespace-separated
-    values, and occasional non-numeric bad-pixel markers (e.g. "No Data",
-    "BAD", "NaN") mixed into otherwise-numeric rows.
-
+    Loading xyz file, 
     skip_header: force a specific number of header lines to skip. If
-    None (default), auto-detect by scanning for the first line that
+    None (default), auto-detects by scanning for the first line that
     parses as >=3 numeric fields.
     """
     def split_line(line):
         return re.split(r"[,\s]+", line.strip())
 
-    # Peek at just the first chunk of lines to find where numeric data
-    # starts -- reading the *whole* file here would defeat the point of
-    # having a fast vectorized parser below for large files.
     if skip_header is None:
         peek_lines = []
         with open(path, "r", encoding="utf-8", errors="ignore") as f:
@@ -183,21 +134,11 @@ def load_xyz(path, skip_header=None, verbose=True):
         print(f"Parsed {len(pts)} points from {path}")
     return pts
 
-
-# --------------------------------------------------------------------------
 # Slicing + peak detection
-# --------------------------------------------------------------------------
 def profile_peaks(cross_coord, z, n_bins, prominence, min_peak_distance):
     """
-    Bin `cross_coord` into n_bins, take max(z) per bin, find peaks in that
-    1D profile. Returns list of (cross_coord_of_peak, z_of_peak, fwhm).
-
-    fwhm is the peak's full width at half prominence, in the same
-    physical units as cross_coord -- i.e. the width of the ridge as seen
-    in this particular cross-sectional slice. Note this is a chord width
-    through the ring at whatever offset this slice happens to be at, not
-    necessarily the true radial width, unless the slice happens to pass
-    through the ring's center.
+    Bins `cross_coord` into n_bins, take max(z) per bin, and finds peaks in that
+    1D profile. Returns list of cross_coord_of_peak, z_of_peak, fwhm.
     """
     lo, hi = cross_coord.min(), cross_coord.max()
     if hi - lo < 1e-9 or len(cross_coord) < 5:
@@ -217,7 +158,7 @@ def profile_peaks(cross_coord, z, n_bins, prominence, min_peak_distance):
     valid = ~np.isnan(prof)
     if valid.sum() < 5:
         return []
-    # Interpolate small gaps so find_peaks doesn't choke on NaNs.
+    # Interpolate small gaps so find_peaks doesn't get stuck on NaNs.
     prof_filled = prof.copy()
     prof_filled[~valid] = np.interp(
         centers[~valid], centers[valid], prof[valid]
@@ -267,12 +208,7 @@ def slice_scan(points, slice_axis, cross_axis, other_axis,
                n_slices, profile_bins, prominence, min_peak_distance,
                min_pts):
     """
-    slice_axis: index (0=x,1=y,2=z) used to define the slabs (e.g. y -> XZ slices)
-    cross_axis: index used as the profile's independent variable (e.g. x)
-    other_axis: the remaining spatial axis, recorded for each detected peak
-                (e.g. y, taken as the slice's mean y)
-
-    Returns an (N, 4) array of candidate rim points: (x, y, z, fwhm).
+    Returns an (n by 4) array of candidate rim points: (x, y, z, fwhm) for each candidate point.
     """
     s = points[:, slice_axis]
     lo, hi = s.min(), s.max()
@@ -307,19 +243,7 @@ def slice_scan(points, slice_axis, cross_axis, other_axis,
 
 def select_by_angle(candidates, center, prefer):
     """
-    Partition candidate points by which slicing direction cuts through
-    the ring closer to perpendicular at their location, using a rough
-    center. This avoids two problems with pooling both directions
-    everywhere: (1) points near the 45-degree regions of the ring get
-    detected independently by both directions and effectively
-    double-counted, and (2) a slice that's nearly tangent to the ring at
-    a given location produces poorly-resolved or merged peaks there.
-
-    A Y-slab (slice_axis=1, profile along x -- "XZ" cross sections) is
-    closer to perpendicular where |y - cy| > |x - cx| (top/bottom
-    regions); an X-slab ("YZ" cross sections) is closer to perpendicular
-    where |x - cx| >= |y - cy| (left/right regions).
-
+    Divides candidate points based on which cross section we should look at (i.e. xz if near the center vs yx if near the top/bottom
     prefer: "xz" or "yz" -- which direction's candidates to keep.
     """
     if len(candidates) == 0:
@@ -329,10 +253,8 @@ def select_by_angle(candidates, center, prefer):
     xz_is_better = dy > dx
     return candidates[xz_is_better] if prefer == "xz" else candidates[~xz_is_better]
 
-
-# --------------------------------------------------------------------------
 # Inner / outer classification (1D two-means on radius)
-# --------------------------------------------------------------------------
+
 def kmeans_1d(values, k=2, n_iter=100, seed=0):
     rng = np.random.default_rng(seed)
     values = np.asarray(values, dtype=float)
@@ -362,11 +284,8 @@ def classify_inner_outer(candidates, center_xy):
 
 def classify_and_refine(candidates, center_xy, n_iter=3):
     """
-    Classify candidates into inner/outer by radius from center_xy, then
-    re-estimate the center from the classified points and repeat. This is
-    far more robust than relying only on a single rough-center guess
-    (e.g. one seeded from a raw Z-percentile threshold, which can be
-    skewed by background waviness/noise far from the actual ring).
+    Classify candidates into inner/outer by radius from initial guess of center_xy, then
+    re-estimate the center from the classified points and repeat.
     """
     center = np.array(center_xy, dtype=float)
     inner, outer = classify_inner_outer(candidates, center)
@@ -382,10 +301,8 @@ def classify_and_refine(candidates, center_xy, n_iter=3):
         inner, outer = classify_inner_outer(candidates, center)
     return inner, outer, center
 
+# Ellipse fit (Halir & Flusser 1998 direct least-squares fit) 
 
-# --------------------------------------------------------------------------
-# Ellipse fit (Halir & Flusser 1998 direct least-squares fit)
-# --------------------------------------------------------------------------
 def fit_ellipse_conic(x, y):
     x = x[:, None]
     y = y[:, None]
@@ -459,17 +376,10 @@ def ellipse_normalized_radius(x, y, ellipse):
 def reject_ellipse_outliers(points, ellipse, k=3.0):
     """
     Drop points whose (x, y) deviates too far from an already-fitted
-    ellipse -- no refitting here, just filtering against the ellipse
-    that was already computed from the full group.
-
-    Deviation is measured as (normalized_radius - 1), i.e. how far a
-    point sits from the ellipse boundary in units of the ellipse's own
-    radius. Points beyond k robust-sigmas (MAD-based) of that deviation
-    are treated as outliers -- typically slice-detection artifacts or
-    points that got misclassified into the wrong group.
+    ellipse
 
     Returns (filtered_points, keep_mask) where keep_mask indexes into
-    the original `points` array.
+    the original points array.
     """
     if len(points) == 0 or ellipse is None:
         return points, np.ones(len(points), dtype=bool)
@@ -488,17 +398,8 @@ def reject_ellipse_outliers(points, ellipse, k=3.0):
 
 def fwhm_stats(points):
     """
-    Aggregate FWHM (full width at half prominence) across a group of
-    already-classified edge points. Each point carries the FWHM of the
-    ridge peak from the specific cross-sectional slice it was detected
-    in (column index 3, set back in profile_peaks/slice_scan) -- this
-    function just summarizes that per-point FWHM across the group.
-
-    Note each individual FWHM is a chord width through the ring at
-    whatever slice offset that point came from, not necessarily the
-    true radial width (that would require the slice to pass exactly
-    through the ring's center). Aggregating across many slices/angles
-    gives a reasonable overall estimate, but expect some spread.
+    FWHM stats (full width at half prominence) for each group of
+    edge points. 
     """
     if len(points) == 0 or points.shape[1] < 4:
         return None
@@ -563,15 +464,12 @@ def evaluate_surface(coeffs, x, y, order):
 def flatten_baseline(points, outer_ellipse, order=2, margin=0.08,
                       robust_iters=3, robust_k=3.0):
     """
-    Fit a plane/quadratic surface to points safely outside the outer rim
-    (the true, uncut baseline) and subtract it from every point in the
+    Fit a plane/quadratic surface to points outside the outer rim
+    and subtract it from every point in the
     cloud. Returns (points_flattened, coeffs, baseline_mask).
 
     margin: fraction beyond the outer ellipse's normalized radius (1.0)
-            required for a point to be treated as baseline, e.g. 0.08
-            means only points with normalized radius > 1.08 are used for
-            the fit -- keeps any residual recast/ridge material out of
-            the baseline estimate.
+            required for a point to be treated as baseline (i.e. not on the edge)
     """
     norm_r = ellipse_normalized_radius(points[:, 0], points[:, 1], outer_ellipse)
     baseline_mask = norm_r > (1.0 + margin)
@@ -612,9 +510,8 @@ def z_stats(z):
     }
 
 
-# --------------------------------------------------------------------------
 # Main
-# --------------------------------------------------------------------------
+
 def run_pipeline(xyz_file, skip_header=None, n_slices=200, profile_bins=300,
                   prominence=None, min_peak_distance=3, min_pts=15,
                   z_percentile=90, plot=None, surface_order=2,
@@ -622,15 +519,7 @@ def run_pipeline(xyz_file, skip_header=None, n_slices=200, profile_bins=300,
                   subsample=15000, reject_outliers=True, outlier_k=3.0,
                   drop_negative_z=True, directional_split=True):
     """
-    Run the full rim-detection / ellipse-fit / flattening pipeline.
-
-    This is the function to call directly from a Jupyter notebook or any
-    other Python code -- it takes plain keyword arguments (no argparse,
-    no dependence on sys.argv), so it works the same whether you run it
-    from a terminal script or a notebook cell:
-
-        from edge_detection_ellipse_fit import run_pipeline
-        results = run_pipeline("sample.xyz", plot="rim_fit.png")
+    Run the full pipeline.
 
     Returns a dict with keys "inner" and "outer", each holding
     {"stats": {...}, "ellipse": {...}, "fwhm_stats": {...},
@@ -657,7 +546,7 @@ def run_pipeline(xyz_file, skip_header=None, n_slices=200, profile_bins=300,
         print(f"Auto prominence threshold (from detrended residual, "
               f"noise sigma~{sigma:.4g}): {prominence:.4g}")
 
-    # Rough center: just a seed value. A raw Z-percentile threshold can be
+    # Rough center: random value. A raw Z-percentile threshold can be
     # skewed by background waviness/noise far from the actual ring, so the
     # real center used for classification is refined from the detected
     # ridge candidates themselves (see classify_and_refine below).
@@ -877,14 +766,7 @@ def make_plot(pts, results, path, subsample_n=15000, seed=0):
 
 def main(argv=None):
     """
-    Command-line entry point. Only used when running this file as a
-    script (`python edge_detection_ellipse_fit.py ...`); parses sys.argv
-    (or `argv` if given) and calls run_pipeline(). If you're working in a
-    Jupyter notebook, don't call this -- import and call run_pipeline()
-    directly instead, e.g.:
-
-        from edge_detection_ellipse_fit import run_pipeline
-        results = run_pipeline("sample.xyz", plot="rim_fit.png")
+    Command-line entry point. 
     """
     ap = argparse.ArgumentParser(description=__doc__,
                                   formatter_class=argparse.RawDescriptionHelpFormatter)
