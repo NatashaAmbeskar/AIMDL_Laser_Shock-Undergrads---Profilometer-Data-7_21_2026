@@ -39,39 +39,6 @@ def load_xyz(path, skip_header=None, verbose=True):
     """
     def split_line(line):
         return re.split(r"[,\s]+", line.strip())
-
-    if skip_header is None:
-        peek_lines = []
-        with open(path, "r", encoding="utf-8", errors="ignore") as f:
-            for _ in range(1000):
-                line = f.readline()
-                if not line:
-                    break
-                peek_lines.append(line)
-
-        skip_header = None
-        for i, line in enumerate(peek_lines):
-            parts = [p for p in split_line(line) if p != ""]
-            if len(parts) < 3:
-                continue
-            try:
-                float(parts[0]); float(parts[1]); float(parts[2])
-            except ValueError:
-                continue
-            skip_header = i
-            break
-        if skip_header is None:
-            raise ValueError(
-                f"Could not find a numeric 'x y z' data row in the first "
-                f"{len(peek_lines)} lines of {path}. Check that this is "
-                f"really a point-cloud export and not, e.g., an image or "
-                f"binary Zygo .dat/.datx file, or pass skip_header= "
-                f"explicitly if the header is longer than that."
-            )
-        if verbose and skip_header > 0:
-            print(f"Detected {skip_header} header line(s) before the data "
-                  f"starts (first skipped line: {peek_lines[0].strip()!r})")
-
     # Fast path: vectorized parsing via pandas. Handles comma- or
     # whitespace-delimited files and coerces any non-numeric bad-pixel
     # markers to NaN (then drops them), without a slow per-line Python loop.
@@ -242,7 +209,7 @@ def slice_scan(points, slice_axis, cross_axis, other_axis,
 
 def select_by_angle(candidates, center, prefer):
     """
-    Divides candidate points based on which cross section we should look at (i.e. xz if near the center vs yx if near the top/bottom
+    Divides candidate points based on which cross section we should look at (i.e. xz if x coord is closer the center vs yz if otherwise)
     prefer: "xz" or "yz" -- which direction's candidates to keep.
     """
     if len(candidates) == 0:
@@ -570,7 +537,7 @@ def run_pipeline(xyz_file, skip_header=None, n_slices=200, profile_bins=300,
 
     candidates_xz_raw = len(cand_xz)
     candidates_yz_raw = len(cand_yz)
-    if directional_split:
+    if directional_split:  
         cand_xz = select_by_angle(cand_xz, rough_center, prefer="xz")
         cand_yz = select_by_angle(cand_yz, rough_center, prefer="yz")
         print(f"Directional split (perpendicular-only): kept {len(cand_xz)}/"
